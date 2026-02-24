@@ -1,0 +1,172 @@
+; openbrew journal — example data
+; This is a sample file to demonstrate the format.
+; Delete this and start fresh with `openbrew init`
+
+2025-01-05 bean "Ethiopia Yirgacheffe"
+  roaster: Sweet Bloom
+  origin: Ethiopia
+  process: washed
+  roast: light
+  price: $18.50
+  weight: 340g
+  +single-origin, +fruity, +floral
+  ; Incredible blueberry and jasmine aroma right out of the bag
+
+2025-01-08 bean "Colombia Huila"
+  roaster: Onyx Coffee Lab
+  origin: Colombia
+  process: washed
+  roast: medium
+  price: $16.00
+  weight: 12oz
+  +single-origin, +chocolate, +nutty
+
+2025-01-20 bean "Espresso Blend No. 3"
+  roaster: Counter Culture
+  origin: Brazil / Ethiopia blend
+  process: natural / washed
+  roast: medium
+  price: $15.00
+  weight: 12oz
+  +blend, +espresso, +everyday
+
+2025-02-01 bean "Kenya Nyeri AA"
+  roaster: George Howell
+  origin: Kenya
+  process: washed
+  roast: light
+  price: $22.00
+  weight: 250g
+  +single-origin, +bright, +complex
+
+2025-01-10 brew "Ethiopia Yirgacheffe"
+  method: v60
+  dose_in: 18g
+  dose_out: 290ml
+  grind: 22
+  water_temp: 96°C
+  brew_time: 3:15
+  rating: 4/5
+  +morning, +pourover
+  ; Bright and fruity, lovely blueberry sweetness
+
+2025-01-11 brew "Ethiopia Yirgacheffe"
+  method: v60
+  dose_in: 18g
+  dose_out: 300ml
+  grind: 20
+  water_temp: 95°C
+  brew_time: 3:30
+  rating: 5/5
+  +morning, +pourover
+  ; Dialed in — finer grind brought out more complexity. Perfect cup.
+
+2025-01-12 brew "Ethiopia Yirgacheffe"
+  method: aeropress
+  dose_in: 15g
+  dose_out: 220ml
+  grind: 18
+  water_temp: 90°C
+  brew_time: 2:00
+  rating: 3/5
+  +afternoon
+  ; A bit muted in the aeropress compared to v60
+
+2025-01-14 brew "Colombia Huila"
+  method: v60
+  dose_in: 18g
+  dose_out: 285ml
+  grind: 24
+  water_temp: 96°C
+  brew_time: 3:00
+  rating: 4/5
+  +morning
+  ; Nice chocolate and caramel notes, smooth finish
+
+2025-01-16 brew "Colombia Huila"
+  method: french-press
+  dose_in: 30g
+  dose_out: 500ml
+  grind: 32
+  water_temp: 96°C
+  brew_time: 4:00
+  rating: 4/5
+  +weekend
+  ; Full body, great for sharing. Nutty and rich.
+
+2025-01-18 brew "Colombia Huila"
+  method: espresso
+  dose_in: 18g
+  dose_out: 36g
+  grind: 8
+  water_temp: 93°C
+  brew_time: 0:28
+  rating: 3/5
+  +espresso
+  ; Decent shot but a bit thin. Maybe dose up next time.
+
+2025-01-22 brew "Espresso Blend No. 3"
+  method: espresso
+  dose_in: 18g
+  dose_out: 38g
+  grind: 7
+  water_temp: 93°C
+  brew_time: 0:30
+  rating: 4/5
+  +espresso, +morning
+  ; Solid everyday espresso. Chocolate and caramel.
+
+2025-01-25 brew "Espresso Blend No. 3"
+  method: espresso
+  dose_in: 19g
+  dose_out: 40g
+  grind: 7
+  water_temp: 93°C
+  brew_time: 0:32
+  rating: 5/5
+  +espresso, +morning
+  ; Best shot from this bag. Bumping dose to 19g was the move.
+
+2025-01-28 brew "Espresso Blend No. 3"
+  method: aeropress
+  dose_in: 15g
+  dose_out: 230ml
+  grind: 16
+  water_temp: 88°C
+  brew_time: 1:30
+  rating: 3/5
+  +afternoon
+  ; Works ok in aeropress but really shines as espresso
+
+2025-02-03 brew "Kenya Nyeri AA"
+  method: v60
+  dose_in: 18g
+  dose_out: 290ml
+  grind: 22
+  water_temp: 96°C
+  brew_time: 3:10
+  rating: 5/5
+  +morning, +pourover
+  ; Incredible. Blackcurrant and grapefruit. Worth every penny.
+
+2025-02-04 brew "Kenya Nyeri AA"
+  method: v60
+  dose_in: 18g
+  dose_out: 295ml
+  grind: 21
+  water_temp: 97°C
+  brew_time: 3:20
+  rating: 4/5
+  +morning, +pourover
+  ; Still great but slightly overextracted. Back off temp or grind.
+
+2025-02-05 brew "Kenya Nyeri AA"
+  method: chemex
+  dose_in: 30g
+  dose_out: 500ml
+  grind: 26
+  water_temp: 96°C
+  brew_time: 4:30
+  rating: 4/5
+  +weekend, +sharing
+  ; Beautiful clarity in the Chemex. Made enough for two.

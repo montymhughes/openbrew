@@ -1,0 +1,989 @@
+#!/usr/bin/env python3
+"""
+openbrew - A plain-text coffee journal & stats tracker.
+
+Inspired by hledger and the plain-text accounting movement.
+Track your beans, brews, and tasting notes in a simple, human-readable file.
+
+Usage:
+    openbrew [options] <command> [args]
+
+Commands:
+    add bean          Add a new bean entry
+    add brew          Add a new brew entry
+    beans             List all beans
+    brews             List all brews (filterable)
+    stats             Show brewing statistics
+    timeline          Show a timeline of recent brews
+    top               Show top-rated beans/brews
+    search <query>    Search across all entries
+    tags              List all tags
+    methods           List all brew methods used
+    import <file>     Import entries from another file
+    init              Create a new empty journal file
+    edit              Open journal in $EDITOR
+    help              Show this help
+
+File format:
+    See README.md or run `openbrew help format`
+
+License: MIT
+"""
+
+import sys
+import os
+import re
+import argparse
+import subprocess
+import datetime
+import statistics
+from collections import defaultdict, Counter
+from pathlib import Path
+
+__version__ = "0.1.0"
+PROG = "openbrew"
+
+# ─── Default Config ──────────────────────────────────────────────────────────
+
+DEFAULT_FILE = os.environ.get("OPENBREW", "~/.openbrew.journal")
+DATE_FMT = "%Y-%m-%d"
+RATING_STARS = {1: "★☆☆☆☆", 2: "★★☆☆☆", 3: "★★★☆☆", 4: "★★★★☆", 5: "★★★★★"}
+
+# ─── ANSI colors (respects NO_COLOR) ─────────────────────────────────────────
+
+USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+def c(code, text):
+    if USE_COLOR:
+        return f"\033[{code}m{text}\033[0m"
+    return str(text)
+
+def dim(t):    return c("2", t)
+def bold(t):   return c("1", t)
+def green(t):  return c("32", t)
+def yellow(t): return c("33", t)
+def cyan(t):   return c("36", t)
+def red(t):    return c("31", t)
+def mag(t):    return c("35", t)
+
+# ─── Parser ──────────────────────────────────────────────────────────────────
+
+class Bean:
+    """A coffee bean entry."""
+    def __init__(self, name="", roaster="", origin="", process="",
+                 roast_level="", date_added=None, tags=None, notes=None, price=None, weight=None, roast_date=None, varietals=None, finished=False):
+        self.name = name
+        self.roaster = roaster
+        self.origin = origin
+        self.process = process
+        self.roast_level = roast_level
+        self.date_added = date_added or datetime.date.today().isoformat()
+        self.tags = tags or []
+        self.notes = notes or []
+        self.price = price
+        self.weight = weight
+        self.roast_date = roast_date
+        self.varietals = varietals
+        self.finished = finished
+
+    def __repr__(self):
+        return f"Bean({self.name!r}, roaster={self.roaster!r})"
+
+class Brew:
+    """A brew entry."""
+    def __init__(self, bean="", method="", date=None, dose_in=None, water_in=None,
+                 grind=None, water_temp=None, brew_time=None, rating=None,
+                 tags=None, notes=None):
+        self.bean = bean
+        self.method = method
+        self.date = date or datetime.date.today().isoformat()
+        self.dose_in = dose_in
+        self.water_in = water_in
+        self.grind = grind
+        self.water_temp = water_temp
+        self.brew_time = brew_time
+        self.rating = rating
+        self.tags = tags or []
+        self.notes = notes or []
+
+    @property
+    def ratio(self):
+        if self.dose_in and self.water_in:
+            try:
+                val_in = float(re.sub(r'[^\d.]', '', self.dose_in))
+                val_out = float(re.sub(r'[^\d.]', '', self.water_in))
+                if val_in > 0:
+                    return round(val_out / val_in, 1)
+            except (ValueError, ZeroDivisionError):
+                return None
+        return None
+
+    def __repr__(self):
+        return f"Brew({self.bean!r}, method={self.method!r}, date={self.date!r})"
+
+
+def parse_journal(filepath):
+    """Parse a .journal file into lists of Bean and Brew objects."""
+    beans = []
+    brews = []
+
+    if not os.path.exists(filepath):
+        return beans, brews
+
+    with open(filepath, "r") as f:
+        lines = f.readlines()
+
+    current = None
+    current_type = None
+    i = 0
+
+    while i < len(lines):
+        line = lines[i].rstrip("\n")
+
+        # Skip blank lines and comments
+        if not line.strip() or line.strip().startswith("#") or line.strip().startswith(";"):
+            # If we were building an entry, finalize it
+            if current is not None:
+                if current_type == "bean":
+                    beans.append(current)
+                elif current_type == "brew":
+                    brews.append(current)
+                current = None
+                current_type = None
+            i += 1
+            continue
+
+        # Detect entry headers
+        bean_match = re.match(r'^(\d{4}-\d{2}-\d{2})\s+bean\s+"(.+)"', line)
+        brew_match = re.match(r'^(\d{4}-\d{2}-\d{2})\s+brew\s+"(.+)"', line)
+
+        if bean_match:
+            if current is not None:
+                if current_type == "bean":
+                    beans.append(current)
+                elif current_type == "brew":
+                    brews.append(current)
+            current = Bean(name=bean_match.group(2), date_added=bean_match.group(1))
+            current_type = "bean"
+            i += 1
+            continue
+
+        if brew_match:
+            if current is not None:
+                if current_type == "bean":
+                    beans.append(current)
+                elif current_type == "brew":
+                    brews.append(current)
+            current = Brew(bean=brew_match.group(2), date=brew_match.group(1))
+            current_type = "brew"
+            i += 1
+            continue
+
+        # Parse indented fields (belonging to current entry)
+        if current is not None and (line.startswith("  ") or line.startswith("\t")):
+            field_line = line.strip()
+
+            # Tags line: tag1, tag2, tag3 (prefixed with +)
+            if field_line.startswith("+"):
+                tags = [t.strip().lstrip("+") for t in field_line.split(",")]
+                tags = [t.lstrip("+").strip() for t in tags]
+                current.tags.extend([t for t in tags if t])
+                i += 1
+                continue
+
+            # Note line (prefixed with ;)
+            if field_line.startswith(";"):
+                current.notes.append(field_line.lstrip("; ").strip())
+                i += 1
+                continue
+
+            # Key: value pairs
+            kv = re.match(r'^(\w[\w\s-]*):\s*(.+)', field_line)
+            if kv:
+                key = kv.group(1).strip().lower().replace(" ", "_").replace("-", "_")
+                val = kv.group(2).strip()
+
+                if current_type == "bean":
+                    if key == "roaster":      current.roaster = val
+                    elif key == "origin":     current.origin = val
+                    elif key == "process":    current.process = val
+                    elif key in ("roast_level", "roast"): current.roast_level = val
+                    elif key == "price":      current.price = val
+                    elif key == "weight":     current.weight = val
+                    elif key =="roast_date":  current.roast_date = val
+                    elif key =="varietals":   current.varietals = val
+                    elif key in("finished", "archived", "done"): current.finished = val.lower() in ("true", "yes", "1", "done")
+
+                elif current_type == "brew":
+                    if key == "method":       current.method = val
+                    elif key in ("dose_in", "in", "dose"): current.dose_in = val
+                    elif key in ("water_in", "water", "pour"): current.water_in = val
+                    elif key == "grind":      current.grind = val
+                    elif key in ("water_temp", "temp", "water"): current.water_temp = val
+                    elif key in ("brew_time", "time"): current.brew_time = val
+                    elif key == "rating":
+                        # Accept "4", "4/5", "4 / 5", "★★★★"
+                        r = re.match(r'(\d)', val)
+                        if r:
+                            current.rating = int(r.group(1))
+                i += 1
+                continue
+
+        i += 1
+
+    # Don't forget the last entry
+    if current is not None:
+        if current_type == "bean":
+            beans.append(current)
+        elif current_type == "brew":
+            brews.append(current)
+
+    return beans, brews
+
+
+def serialize_bean(bean):
+    """Serialize a Bean back to journal format."""
+    lines = [f'{bean.date_added} bean "{bean.name}"']
+    if bean.roaster:     lines.append(f"  roaster: {bean.roaster}")
+    if bean.origin:      lines.append(f"  origin: {bean.origin}")
+    if bean.process:     lines.append(f"  process: {bean.process}")
+    if bean.roast_level: lines.append(f"  roast: {bean.roast_level}")
+    if bean.roast_date:  lines.append(f"  roast_date: {bean.roast_date}")
+    if bean.price:       lines.append(f"  price: {bean.price}")
+    if bean.weight:      lines.append(f"  weight: {bean.weight}")
+    if bean.varietals:   lines.append(f"  varietals: {bean.varietals}")
+    if bean.finished:    lines.append(f"  finished: yes")
+    if bean.tags:        lines.append(f"  +{', +'.join(bean.tags)}")
+    for note in bean.notes:
+        lines.append(f"  ; {note}")
+    return "\n".join(lines)
+
+
+def serialize_brew(brew):
+    """Serialize a Brew back to journal format."""
+    lines = [f'{brew.date} brew "{brew.bean}"']
+    if brew.method:     lines.append(f"  method: {brew.method}")
+    if brew.dose_in:    lines.append(f"  dose_in: {brew.dose_in}")
+    if brew.water_in:   lines.append(f"  water_in: {brew.water_in}")
+    if brew.grind:      lines.append(f"  grind: {brew.grind}")
+    if brew.water_temp: lines.append(f"  water_temp: {brew.water_temp}")
+    if brew.brew_time:  lines.append(f"  brew_time: {brew.brew_time}")
+    if brew.rating:     lines.append(f"  rating: {brew.rating}/5")
+    if brew.tags:       lines.append(f"  +{', +'.join(brew.tags)}")
+    for note in brew.notes:
+        lines.append(f"  ; {note}")
+    return "\n".join(lines)
+
+def sync_active_beans(filepath):
+    """Write a plain list of active bean names next to the journal file.
+    This is used by iOS Shortcuts to build a dropdown picker."""
+    beans, _ = parse_journal(filepath)
+    active_names = sorted(set(b.name for b in beans if not b.finished))
+    beans_file = os.path.join(os.path.dirname(filepath), "active-beans.txt")
+    with open(beans_file, "w") as f:
+        f.write("\n".join(active_names) + "\n")
+
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+def cmd_init(args):
+    """Create a new journal file."""
+    filepath = os.path.expanduser(args.file)
+    if os.path.exists(filepath):
+        print(f"{PROG}: {filepath} already exists.")
+        return 1
+    with open(filepath, "w") as f:
+        f.write(f"; openbrew journal\n")
+        f.write(f"; created {datetime.date.today().isoformat()}\n")
+        f.write(f"; https://github.com/your-username/openbrew\n\n")
+    print(f"Created {filepath}")
+    return 0
+
+
+def cmd_edit(args):
+    """Open journal in $EDITOR."""
+    filepath = os.path.expanduser(args.file)
+    editor = os.environ.get("EDITOR", os.environ.get("VISUAL", "vi"))
+    return subprocess.call([editor, filepath])
+
+
+def prompt(label, default=None, required=False):
+    """Interactive prompt helper."""
+    suffix = f" [{default}]" if default else ""
+    suffix += ": " if not required else " (required): "
+    while True:
+        val = input(f"  {label}{suffix}").strip()
+        if not val and default:
+            return default
+        if not val and required:
+            print(f"  {label} is required.")
+            continue
+        if not val:
+            return None
+        return val
+
+
+def cmd_add_bean(args):
+    """Interactively add a bean entry."""
+    filepath = os.path.expanduser(args.file)
+    print(bold("Add a new bean"))
+    print(dim("─" * 40))
+
+    bean = Bean()
+    bean.date_added = prompt("Date", datetime.date.today().isoformat())
+    bean.name = prompt("Name", required=True)
+    bean.roaster = prompt("Roaster") or ""
+    bean.origin = prompt("Origin") or ""
+    bean.process = prompt("Process (washed/natural/honey/...)") or ""
+    bean.roast_level = prompt("Roast level (light/medium/dark)") or ""
+    bean.roast_date = prompt("Roast date (YYYY-MM-DD)") or ""
+    bean.price = prompt("Price") or ""
+    bean.weight = prompt("Weight") or ""
+    bean.varietals = prompt("Varietals") or ""
+
+    tags_str = prompt("Tags (comma-separated)")
+    if tags_str:
+        bean.tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+
+    note = prompt("Note")
+    if note:
+        bean.notes.append(note)
+
+    entry = serialize_bean(bean)
+    print()
+    print(dim("─── preview ───"))
+    print(entry)
+    print(dim("───────────────"))
+
+    confirm = input("  Save? [Y/n]: ").strip().lower()
+    if confirm in ("", "y", "yes"):
+        with open(filepath, "a") as f:
+            f.write(f"\n{entry}\n")
+        print(green("✓ Bean added."))
+        sync_active_beans(filepath)
+    else:
+        print("Cancelled.")
+    return 0
+
+
+def cmd_add_brew(args):
+    """Interactively add a brew entry."""
+    filepath = os.path.expanduser(args.file)
+    beans, _ = parse_journal(filepath)
+
+    print(bold("Add a new brew"))
+    print(dim("─" * 40))
+
+    # Show available beans
+    if beans:
+        active_beans = [b for b in beans if not b.finished]
+        if active_beans:
+            print(dim("  Known beans:"))
+            unique_beans = sorted(set(b.name for b in active_beans))
+            for i, name in enumerate(unique_beans, 1):
+                print(dim(f"    {i}. {name}"))
+            print()
+
+    brew = Brew()
+    brew.date = prompt("Date", datetime.date.today().isoformat())
+
+    bean_input = prompt("Bean name", required=True)
+    # Allow selecting by number
+    if beans:
+        active_beans = [b for b in beans if not b.finished]
+        unique_beans = sorted(set(b.name for b in active_beans))
+        if bean_input.isdigit():
+            idx = int(bean_input) - 1
+            if 0 <= idx < len(unique_beans):
+                bean_input = unique_beans[idx]
+    brew.bean = bean_input
+
+    brew.method = prompt("Method (v60/aeropress/espresso/chemex/french-press/...)") or ""
+    brew.dose_in = prompt("Dose in (g)") or ""
+    brew.water_in = prompt("Water in/ pour weight (g or ml)") or ""
+    brew.grind = prompt("Grind setting") or ""
+    brew.water_temp = prompt("Water temp") or ""
+    brew.brew_time = prompt("Brew time") or ""
+
+    rating_str = prompt("Rating (1-5)")
+    if rating_str and rating_str.isdigit():
+        brew.rating = min(5, max(1, int(rating_str)))
+
+    tags_str = prompt("Tags (comma-separated)")
+    if tags_str:
+        brew.tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+
+    note = prompt("Note")
+    if note:
+        brew.notes.append(note)
+
+    entry = serialize_brew(brew)
+    print()
+    print(dim("─── preview ───"))
+    print(entry)
+    print(dim("───────────────"))
+
+    confirm = input("  Save? [Y/n]: ").strip().lower()
+    if confirm in ("", "y", "yes"):
+        with open(filepath, "a") as f:
+            f.write(f"\n{entry}\n")
+        print(green("✓ Brew added."))
+    else:
+        print("Cancelled.")
+    return 0
+
+
+def cmd_beans(args):
+    """List all beans."""
+    filepath = os.path.expanduser(args.file)
+    beans, brews = parse_journal(filepath)
+
+    if not beans:
+        print("No beans found.")
+        return 0
+
+    # Count brews per bean
+    brew_counts = Counter(b.bean for b in brews)
+    # Avg rating per bean
+    bean_ratings = defaultdict(list)
+    for b in brews:
+        if b.rating:
+            bean_ratings[b.bean].append(b.rating)
+
+    print(bold(f"{'Bean':<30} {'Roaster':<20} {'Origin':<15} {'Brews':>5} {'Avg':>5}"))
+    print(dim("─" * 80))
+
+    for bean in sorted(beans, key=lambda b: b.date_added, reverse=True):
+        count = brew_counts.get(bean.name, 0)
+        ratings = bean_ratings.get(bean.name, [])
+        avg = f"{statistics.mean(ratings):.1f}" if ratings else "  -"
+        print(f"{bean.name:<30} {bean.roaster:<20} {bean.origin:<15} {count:>5} {avg:>5}")
+
+    print(dim(f"\n{len(beans)} bean(s)"))
+    return 0
+
+
+def cmd_brews(args):
+    """List brews, with optional filters."""
+    filepath = os.path.expanduser(args.file)
+    _, brews = parse_journal(filepath)
+
+    if not brews:
+        print("No brews found.")
+        return 0
+
+    # Apply filters
+    if hasattr(args, "bean") and args.bean:
+        q = args.bean.lower()
+        brews = [b for b in brews if q in b.bean.lower()]
+    if hasattr(args, "method") and args.method:
+        q = args.method.lower()
+        brews = [b for b in brews if q in b.method.lower()]
+    if hasattr(args, "since") and args.since:
+        brews = [b for b in brews if b.date >= args.since]
+    if hasattr(args, "until") and args.until:
+        brews = [b for b in brews if b.date <= args.until]
+
+    # Limit
+    limit = getattr(args, "limit", None)
+    if limit:
+        brews = brews[-int(limit):]
+
+    print(bold(f"{'Date':<12} {'Bean':<25} {'Method':<14} {'In':>5} {'Water':>5} {'Ratio':>6} {'Rating':>7}"))
+    print(dim("─" * 80))
+
+    for brew in sorted(brews, key=lambda b: b.date):
+        ratio = f"1:{brew.ratio}" if brew.ratio else "    -"
+        rating = RATING_STARS.get(brew.rating, "   -") if brew.rating else "   -"
+        dose_in = brew.dose_in or "-"
+        water_in = brew.water_in or "-"
+        print(f"{brew.date:<12} {brew.bean:<25} {brew.method:<14} {dose_in:>5} {water_in:>5} {ratio:>6} {rating:>7}")
+
+    print(dim(f"\n{len(brews)} brew(s)"))
+    return 0
+
+
+def cmd_stats(args):
+    """Show overall statistics."""
+    filepath = os.path.expanduser(args.file)
+    beans, brews = parse_journal(filepath)
+
+    print(bold("openbrew stats"))
+    print(dim("─" * 40))
+    print(f"  Beans tracked:    {len(beans)}")
+    print(f"  Total brews:      {len(brews)}")
+
+    if not brews:
+        return 0
+
+    # Methods
+    methods = Counter(b.method for b in brews if b.method)
+    if methods:
+        top_method = methods.most_common(1)[0]
+        print(f"  Favorite method:  {top_method[0]} ({top_method[1]} brews)")
+
+    # Ratings
+    rated = [b for b in brews if b.rating]
+    if rated:
+        avg = statistics.mean(b.rating for b in rated)
+        print(f"  Avg rating:       {avg:.1f}/5 ({len(rated)} rated)")
+
+    # Date range
+    dates = sorted(b.date for b in brews)
+    if dates:
+        print(f"  First brew:       {dates[0]}")
+        print(f"  Latest brew:      {dates[-1]}")
+
+    # Brews per week (approximate)
+    if len(dates) >= 2:
+        try:
+            d0 = datetime.date.fromisoformat(dates[0])
+            d1 = datetime.date.fromisoformat(dates[-1])
+            days = (d1 - d0).days or 1
+            per_week = len(brews) / (days / 7)
+            print(f"  Brews per week:   {per_week:.1f}")
+        except ValueError:
+            pass
+
+    # Top beans
+    bean_counts = Counter(b.bean for b in brews)
+    print()
+    print(bold("  Top beans:"))
+    for name, count in bean_counts.most_common(5):
+        bar = "█" * count
+        print(f"    {name:<25} {count:>3}  {dim(bar)}")
+
+    # Method breakdown
+    if methods:
+        print()
+        print(bold("  Methods:"))
+        for method, count in methods.most_common():
+            pct = count / len(brews) * 100
+            bar = "█" * int(pct / 5)
+            print(f"    {method:<20} {count:>3} ({pct:.0f}%)  {dim(bar)}")
+
+    # Roaster breakdown
+    roaster_counts = Counter(b.roaster for b in beans if b.roaster)
+    if roaster_counts:
+        print()
+        print(bold("  Roasters:"))
+        for roaster, count in roaster_counts.most_common(5):
+            print(f"    {roaster:<25} {count:>3} bean(s)")
+
+    return 0
+
+
+def cmd_timeline(args):
+    """Show a visual timeline of recent brews."""
+    filepath = os.path.expanduser(args.file)
+    _, brews = parse_journal(filepath)
+
+    limit = int(getattr(args, "limit", 0) or 15)
+    brews = sorted(brews, key=lambda b: b.date, reverse=True)[:limit]
+
+    if not brews:
+        print("No brews found.")
+        return 0
+
+    print(bold("Recent brews"))
+    print()
+
+    for brew in reversed(brews):
+        stars = RATING_STARS.get(brew.rating, "     ") if brew.rating else "     "
+        method_tag = f"[{brew.method}]" if brew.method else ""
+        ratio_str = f"1:{brew.ratio}" if brew.ratio else ""
+
+        print(f"  {cyan(brew.date)}  {bold(brew.bean)}")
+        details = [d for d in [method_tag, ratio_str, stars] if d.strip()]
+        if details:
+            print(f"              {' · '.join(details)}")
+        if brew.notes:
+            for note in brew.notes:
+                print(f"              {dim(note)}")
+        print()
+
+    return 0
+
+
+def cmd_top(args):
+    """Show top-rated beans/brews."""
+    filepath = os.path.expanduser(args.file)
+    _, brews = parse_journal(filepath)
+
+    rated = [b for b in brews if b.rating]
+    if not rated:
+        print("No rated brews found.")
+        return 0
+
+    # Group by bean, compute avg
+    bean_ratings = defaultdict(list)
+    for b in rated:
+        bean_ratings[b.bean].append(b.rating)
+
+    sorted_beans = sorted(
+        bean_ratings.items(),
+        key=lambda x: (statistics.mean(x[1]), len(x[1])),
+        reverse=True
+    )
+
+    print(bold(f"{'Bean':<30} {'Avg':>5} {'Brews':>6} {'Rating':>8}"))
+    print(dim("─" * 55))
+
+    limit = int(getattr(args, "limit", 0) or 10)
+    for name, ratings in sorted_beans[:limit]:
+        avg = statistics.mean(ratings)
+        stars = RATING_STARS.get(round(avg), "")
+        print(f"{name:<30} {avg:>5.1f} {len(ratings):>6} {stars:>8}")
+
+    return 0
+
+
+def cmd_search(args):
+    """Full-text search across all entries."""
+    filepath = os.path.expanduser(args.file)
+    beans, brews = parse_journal(filepath)
+    query = " ".join(args.query).lower()
+
+    results = []
+
+    for bean in beans:
+        text = f"{bean.name} {bean.roaster} {bean.origin} {bean.process} {' '.join(bean.tags)} {' '.join(bean.notes)}".lower()
+        if query in text:
+            results.append(("bean", bean.date_added, serialize_bean(bean)))
+
+    for brew in brews:
+        text = f"{brew.bean} {brew.method} {' '.join(brew.tags)} {' '.join(brew.notes)}".lower()
+        if query in text:
+            results.append(("brew", brew.date, serialize_brew(brew)))
+
+    if not results:
+        print(f'No results for "{query}".')
+        return 0
+
+    print(bold(f'{len(results)} result(s) for "{query}"'))
+    print()
+    for kind, date, entry in results:
+        label = green("bean") if kind == "bean" else cyan("brew")
+        print(f"  [{label}] {entry}")
+        print()
+    return 0
+
+
+def cmd_tags(args):
+    """List all tags used."""
+    filepath = os.path.expanduser(args.file)
+    beans, brews = parse_journal(filepath)
+
+    tags = Counter()
+    for bean in beans:
+        tags.update(bean.tags)
+    for brew in brews:
+        tags.update(brew.tags)
+
+    if not tags:
+        print("No tags found.")
+        return 0
+
+    print(bold("Tags"))
+    print(dim("─" * 30))
+    for tag, count in tags.most_common():
+        print(f"  +{tag:<20} {count:>3}")
+    return 0
+
+
+def cmd_methods(args):
+    """List all brew methods used."""
+    filepath = os.path.expanduser(args.file)
+    _, brews = parse_journal(filepath)
+
+    methods = Counter(b.method for b in brews if b.method)
+    if not methods:
+        print("No brew methods found.")
+        return 0
+
+    print(bold("Brew methods"))
+    print(dim("─" * 30))
+    for method, count in methods.most_common():
+        print(f"  {method:<20} {count:>3} brew(s)")
+    return 0
+
+
+def cmd_import(args):
+    """Import entries from another journal file."""
+    filepath = os.path.expanduser(args.file)
+    source = args.source
+
+    if not os.path.exists(source):
+        print(f"File not found: {source}", file=sys.stderr)
+        return 1
+
+    with open(source, "r") as f:
+        content = f.read()
+
+    with open(filepath, "a") as f:
+        f.write(f"\n; imported from {source} on {datetime.date.today().isoformat()}\n")
+        f.write(content)
+        f.write("\n")
+
+    beans, brews = parse_journal(source)
+    print(green(f"✓ Imported {len(beans)} bean(s) and {len(brews)} brew(s) from {source}"))
+    return 0
+
+def cmd_finish(args):
+    """Mark a bean as finished by adding 'finished: yes' to its entry."""
+    filepath = os.path.expanduser(args.file)
+    beans, _ = parse_journal(filepath)
+
+    # Show only active beans
+    active = [b for b in beans if not b.finished]
+    if not active:
+        print("No active beans to finish.")
+        return 0
+
+    print(bold("Finish a bean"))
+    print(dim("─" * 40))
+    unique_names = sorted(set(b.name for b in active))
+    for i, name in enumerate(unique_names, 1):
+        print(f"  {i}. {name}")
+
+    choice = input("\n  Bean name or number: ").strip()
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(unique_names):
+            choice = unique_names[idx]
+        else:
+            print("Invalid number.")
+            return 1
+
+    # Find matching bean(s) in the file
+    matched = [b for b in active if b.name.lower() == choice.lower()]
+    if not matched:
+        print(f'No active bean found matching "{choice}".')
+        return 1
+
+    confirm = input(f'  Mark "{matched[0].name}" as finished? [Y/n]: ').strip().lower()
+    if confirm not in ("", "y", "yes"):
+        print("Cancelled.")
+        return 0
+
+    # Read the raw file and insert "finished: yes" into the matching entry
+    with open(filepath, "r") as f:
+        lines = f.readlines()
+
+    bean_name = matched[0].name
+    i = 0
+    modified = False
+    while i < len(lines):
+        line = lines[i]
+        header = re.match(r'^(\d{4}-\d{2}-\d{2})\s+bean\s+"(.+)"', line)
+        if header and header.group(2) == bean_name:
+            # Find the last indented field line in this entry
+            j = i + 1
+            last_field = i
+            while j < len(lines) and (lines[j].startswith("  ") or lines[j].startswith("\t")):
+                if "finished:" in lines[j]:
+                    break
+                last_field = j
+                j += 1
+            else:
+                # Insert finished: yes after the last field line
+                lines.insert(last_field + 1, "  finished: yes\n")
+                modified = True
+                break
+        i += 1
+
+    if modified:
+        with open(filepath, "w") as f:
+            f.writelines(lines)
+        print(green(f'✓ "{bean_name}" marked as finished.'))
+        sync_active_beans(filepath)
+    else:
+        print(f'Could not modify entry (it may already be finished).')
+        
+
+    return 0
+
+
+def cmd_sync(args):
+    """Manually sync the active beans list."""
+    filepath = os.path.expanduser(args.file)
+    sync_active_beans(filepath)
+    beans_file = os.path.join(os.path.dirname(filepath), "active-beans.txt")
+    print(green(f"✓ Synced active beans to {beans_file}"))
+    return 0
+
+
+def cmd_help_format(args):
+    """Show the journal file format."""
+    print(bold("openbrew file format"))
+    print()
+    print("""A openbrew journal is a plain UTF-8 text file. Entries are separated by
+blank lines. Each entry starts with a date and type, followed by indented fields.
+
+BEAN ENTRY:
+  2024-01-15 bean "Ethiopia Yirgacheffe"
+    roaster: Sweet Bloom
+    origin: Ethiopia
+    process: washed
+    roast: light
+    price: $18.50
+    weight: 340g
+    +single-origin, +fruity
+    ; Blueberry and jasmine notes, amazing aroma
+
+BREW ENTRY:
+  2024-01-16 brew "Ethiopia Yirgacheffe"
+    method: v60
+    dose_in: 18g
+    dose_out: 290ml
+    grind: 22
+    water_temp: 96°C
+    brew_time: 3:15
+    rating: 4/5
+    +morning, +pourover
+    ; Bright and fruity, maybe grind a bit finer next time
+
+RULES:
+  - Dates are YYYY-MM-DD
+  - Entry names are in double quotes
+  - Fields are indented with 2+ spaces or a tab
+  - Tags start with + and are comma-separated
+  - Notes/comments start with ;
+  - Rating is 1-5 (can write as "4" or "4/5")
+  - All fields except date and name are optional
+  - Lines starting with # or ; outside entries are comments
+  - Field names are flexible (e.g. "temp" = "water_temp")
+""")
+    return 0
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog=PROG,
+        description="A plain-text coffee journal & stats tracker.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("-f", "--file", default=DEFAULT_FILE,
+                        help="Journal file (default: $OPENBREW or ~/.openbrew.journal)")
+    parser.add_argument("-V", "--version", action="version", version=f"{PROG} {__version__}")
+
+    sub = parser.add_subparsers(dest="command")
+
+    # add
+    add_p = sub.add_parser("add", help="Add a bean or brew")
+    add_sub = add_p.add_subparsers(dest="add_type")
+    add_sub.add_parser("bean", help="Add a new bean")
+    add_sub.add_parser("brew", help="Add a new brew")
+
+    # beans
+    sub.add_parser("beans", help="List all beans")
+
+    # brews
+    brews_p = sub.add_parser("brews", help="List brews")
+    brews_p.add_argument("-b", "--bean", help="Filter by bean name")
+    brews_p.add_argument("-m", "--method", help="Filter by brew method")
+    brews_p.add_argument("--since", help="Show brews since date (YYYY-MM-DD)")
+    brews_p.add_argument("--until", help="Show brews until date (YYYY-MM-DD)")
+    brews_p.add_argument("-n", "--limit", help="Limit results")
+
+    # stats
+    sub.add_parser("stats", help="Show statistics")
+
+    # timeline
+    tl_p = sub.add_parser("timeline", help="Show recent brew timeline")
+    tl_p.add_argument("-n", "--limit", default=15, help="Number of brews to show")
+
+    # top
+    top_p = sub.add_parser("top", help="Show top-rated beans")
+    top_p.add_argument("-n", "--limit", default=10, help="Number to show")
+
+    # search
+    search_p = sub.add_parser("search", help="Search entries")
+    search_p.add_argument("query", nargs="+", help="Search terms")
+
+    # tags
+    sub.add_parser("tags", help="List all tags")
+
+    # methods
+    sub.add_parser("methods", help="List brew methods")
+
+    # import
+    imp_p = sub.add_parser("import", help="Import from another file")
+    imp_p.add_argument("source", help="Source journal file")
+
+    # init
+    sub.add_parser("init", help="Create a new journal file")
+
+    # edit
+    sub.add_parser("edit", help="Open journal in $EDITOR")
+
+    # help
+    help_p = sub.add_parser("help", help="Show help")
+    help_p.add_argument("topic", nargs="?", default=None)
+
+    # finish
+    sub.add_parser("finish", help="Mark a bean as finished")
+
+    # sync
+    sub.add_parser("sync", help="Sync active beans list for iOS Shortcuts")
+
+    return parser
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        return 0
+
+    # Ensure file exists for most commands
+    filepath = os.path.expanduser(args.file)
+    if args.command not in ("init", "help") and not os.path.exists(filepath):
+        print(f"{PROG}: journal file not found: {filepath}")
+        print(f"Run `{PROG} init` to create one, or use -f to specify a file.")
+        return 1
+
+    commands = {
+        "beans": cmd_beans,
+        "brews": cmd_brews,
+        "stats": cmd_stats,
+        "timeline": cmd_timeline,
+        "top": cmd_top,
+        "search": cmd_search,
+        "tags": cmd_tags,
+        "methods": cmd_methods,
+        "import": cmd_import,
+        "init": cmd_init,
+        "edit": cmd_edit,
+        "finish": cmd_finish,
+        "sync": cmd_sync,
+    }
+
+    if args.command == "add":
+        if args.add_type == "bean":
+            return cmd_add_bean(args)
+        elif args.add_type == "brew":
+            return cmd_add_brew(args)
+        else:
+            print(f"Usage: {PROG} add [bean|brew]")
+            return 1
+
+    if args.command == "help":
+        if args.topic == "format":
+            return cmd_help_format(args)
+        parser.print_help()
+        return 0
+
+    fn = commands.get(args.command)
+    if fn:
+        return fn(args)
+
+    parser.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)
