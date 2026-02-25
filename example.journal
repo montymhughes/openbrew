@@ -170,3 +170,15 @@
   rating: 4/5
   +weekend, +sharing
   ; Beautiful clarity in the Chemex. Made enough for two.
+
+2026-02-25 recipe "Average V60"
+  method: v60
+  dose_in: 16
+  water_in: 250
+  grind_size: medium-fine
+  grinder: Ode
+  water_temp: 97.5
+  brew_time: 2:30
+  bloom_weight: 50
+  bloom_time: 50
+  ; Bloom, pour, drink

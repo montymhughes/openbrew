@@ -122,13 +122,50 @@ class Brew:
         return f"Brew({self.bean!r}, method={self.method!r}, date={self.date!r})"
 
 
+class Recipe:
+    """A Brew Recipe"""
+    def __init__(self, name="", method=None, dose_in=None, water_in=None,
+                 grind_size=None, grinder=None, water_temp=None, brew_time=None,
+                 bloom_weight=None, bloom_time=None, date_added=None,
+                 tags=None, notes=None):
+        self.name = name
+        self.method = method
+        self.dose_in = dose_in
+        self.water_in = water_in
+        self.grind_size = grind_size
+        self.grinder = grinder
+        self.water_temp = water_temp
+        self.brew_time = brew_time
+        self.bloom_weight = bloom_weight
+        self.bloom_time = bloom_time
+        self.date_added = date_added or datetime.date.today().isoformat()
+        self.tags = tags or []
+        self.notes = notes or []
+
+    @property
+    def ratio(self):
+        if self.dose_in and self.water_in:
+            try:
+                val_in = float(re.sub(r'[^\d.]', '', self.dose_in))
+                val_out = float(re.sub(r'[^\d.]', '', self.water_in))
+                if val_in > 0:
+                    return round(val_out / val_in, 1)
+            except (ValueError, ZeroDivisionError):
+                return None
+        return None
+
+    def __repr__(self):
+        return f"Recipe({self.name!r}, method={self.method!r})"
+
+
 def parse_journal(filepath):
     """Parse a .journal file into lists of Bean and Brew objects."""
     beans = []
     brews = []
+    recipes = []
 
     if not os.path.exists(filepath):
-        return beans, brews
+        return beans, brews, recipes
 
     with open(filepath, "r") as f:
         lines = f.readlines()
@@ -148,6 +185,8 @@ def parse_journal(filepath):
                     beans.append(current)
                 elif current_type == "brew":
                     brews.append(current)
+                elif current_type == "recipe":
+                    recipes.append(current)
                 current = None
                 current_type = None
             i += 1
@@ -156,6 +195,7 @@ def parse_journal(filepath):
         # Detect entry headers
         bean_match = re.match(r'^(\d{4}-\d{2}-\d{2})\s+bean\s+"(.+)"', line)
         brew_match = re.match(r'^(\d{4}-\d{2}-\d{2})\s+brew\s+"(.+)"', line)
+        recipe_match = re.match(r'^(\d{4}-\d{2}-\d{2})\s+recipe\s+"(.+)"', line)
 
         if bean_match:
             if current is not None:
@@ -163,6 +203,8 @@ def parse_journal(filepath):
                     beans.append(current)
                 elif current_type == "brew":
                     brews.append(current)
+                elif current_type == "recipe":
+                    recipes.append(current)
             current = Bean(name=bean_match.group(2), date_added=bean_match.group(1))
             current_type = "bean"
             i += 1
@@ -174,8 +216,23 @@ def parse_journal(filepath):
                     beans.append(current)
                 elif current_type == "brew":
                     brews.append(current)
+                elif current_type == "recipe":
+                    recipes.append(current)
             current = Brew(bean=brew_match.group(2), date=brew_match.group(1))
             current_type = "brew"
+            i += 1
+            continue
+
+        if recipe_match:
+            if current is not None:
+                if current_type == "bean":
+                    beans.append(current)
+                elif current_type == "brew":
+                    brews.append(current)
+                elif current_type == "recipe":
+                    recipes.append(current)
+            current = Recipe(name=recipe_match.group(2), date_added=recipe_match.group(1))
+            current_type = "recipe"
             i += 1
             continue
 
@@ -214,6 +271,18 @@ def parse_journal(filepath):
                     elif key =="varietals":   current.varietals = val
                     elif key in("finished", "archived", "done"): current.finished = val.lower() in ("true", "yes", "1", "done")
 
+                elif current_type == "recipe":
+                    if key == "method":          current.method = val
+                    elif key in ("dose_in", "dose"): current.dose_in = val
+                    elif key in ("water_in", "water", "pour"): current.water_in = val
+                    elif key in ("grind_size", "grind"): current.grind_size = val
+                    elif key == "grinder":       current.grinder = val
+                    elif key in ("water_temp", "temp"): current.water_temp = val
+                    elif key in ("brew_time", "time"): current.brew_time = val
+                    elif key in ("bloom_weight", "bloom"): current.bloom_weight = val
+                    elif key == "bloom_time":    current.bloom_time = val
+
+
                 elif current_type == "brew":
                     if key == "method":       current.method = val
                     elif key in ("dose_in", "in", "dose"): current.dose_in = val
@@ -237,8 +306,10 @@ def parse_journal(filepath):
             beans.append(current)
         elif current_type == "brew":
             brews.append(current)
+        elif current_type == "recipe":
+            recipes.append(current)
 
-    return beans, brews
+    return beans, brews, recipes
 
 
 def serialize_bean(bean):
@@ -277,11 +348,29 @@ def serialize_brew(brew):
 def sync_active_beans(filepath):
     """Write a plain list of active bean names next to the journal file.
     This is used by iOS Shortcuts to build a dropdown picker."""
-    beans, _ = parse_journal(filepath)
+    beans, _, _ = parse_journal(filepath)
     active_names = sorted(set(b.name for b in beans if not b.finished))
     beans_file = os.path.join(os.path.dirname(filepath), "active-beans.txt")
     with open(beans_file, "w") as f:
         f.write("\n".join(active_names) + "\n")
+
+
+def serialize_recipe(recipe):
+    """Serialize a Recipe back to journal format."""
+    lines = [f'{recipe.date_added} recipe "{recipe.name}"']
+    if recipe.method:       lines.append(f"  method: {recipe.method}")
+    if recipe.dose_in:      lines.append(f"  dose_in: {recipe.dose_in}")
+    if recipe.water_in:     lines.append(f"  water_in: {recipe.water_in}")
+    if recipe.grind_size:   lines.append(f"  grind_size: {recipe.grind_size}")
+    if recipe.grinder:      lines.append(f"  grinder: {recipe.grinder}")
+    if recipe.water_temp:   lines.append(f"  water_temp: {recipe.water_temp}")
+    if recipe.brew_time:    lines.append(f"  brew_time: {recipe.brew_time}")
+    if recipe.bloom_weight: lines.append(f"  bloom_weight: {recipe.bloom_weight}")
+    if recipe.bloom_time:   lines.append(f"  bloom_time: {recipe.bloom_time}")
+    if recipe.tags:         lines.append(f"  +{', +'.join(recipe.tags)}")
+    for note in recipe.notes:
+        lines.append(f"  ; {note}")
+    return "\n".join(lines)
 
 
 # ─── Commands ────────────────────────────────────────────────────────────────
@@ -369,7 +458,7 @@ def cmd_add_bean(args):
 def cmd_add_brew(args):
     """Interactively add a brew entry."""
     filepath = os.path.expanduser(args.file)
-    beans, _ = parse_journal(filepath)
+    beans, _, _ = parse_journal(filepath)
 
     print(bold("Add a new brew"))
     print(dim("─" * 40))
@@ -433,10 +522,82 @@ def cmd_add_brew(args):
     return 0
 
 
+def cmd_add_recipe(args):
+    """Interactively add a recipe entry."""
+    filepath = os.path.expanduser(args.file)
+    print(bold("Add a new recipe"))
+    print(dim("─" * 40))
+
+    recipe = Recipe()
+    recipe.date_added = prompt("Date", datetime.date.today().isoformat())
+    recipe.name = prompt("Recipe name", required=True)
+    recipe.method = prompt("Method (v60/aeropress/espresso/chemex/french-press/...)") or ""
+    recipe.dose_in = prompt("Dose in (g)") or ""
+    recipe.water_in = prompt("Water in / pour weight (g or ml)") or ""
+    recipe.grind_size = prompt("Grind size") or ""
+    recipe.grinder = prompt("Grinder") or ""
+    recipe.water_temp = prompt("Water temp") or ""
+    recipe.brew_time = prompt("Total brew time") or ""
+    recipe.bloom_weight = prompt("Bloom weight (g)") or ""
+    recipe.bloom_time = prompt("Bloom time") or ""
+
+    tags_str = prompt("Tags (comma-separated)")
+    if tags_str:
+        recipe.tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+
+    note = prompt("Note / steps")
+    if note:
+        recipe.notes.append(note)
+
+    entry = serialize_recipe(recipe)
+    print()
+    print(dim("─── preview ───"))
+    print(entry)
+    print(dim("───────────────"))
+
+    confirm = input("  Save? [Y/n]: ").strip().lower()
+    if confirm in ("", "y", "yes"):
+        with open(filepath, "a") as f:
+            f.write(f"\n{entry}\n")
+        print(green("✓ Recipe added."))
+    else:
+        print("Cancelled.")
+    return 0
+
+
+def cmd_recipes(args):
+    """List all recipes."""
+    filepath = os.path.expanduser(args.file)
+    _, _, recipes = parse_journal(filepath)
+
+    if not recipes:
+        print("No recipes found.")
+        return 0
+
+    # Optional filter by method
+    if hasattr(args, "method") and args.method:
+        q = args.method.lower()
+        recipes = [r for r in recipes if r.method and q in r.method.lower()]
+
+    print(bold(f"{'Recipe':<30} {'Method':<15} {'Dose':>6} {'Water':>7} {'Ratio':>6} {'Grind':>8} {'Temp':>6}"))
+    print(dim("─" * 95))
+
+    for recipe in sorted(recipes, key=lambda r: r.date_added, reverse=True):
+        dose = recipe.dose_in or "-"
+        water = recipe.water_in or "-"
+        ratio = f"1:{recipe.ratio}" if recipe.ratio else "  -"
+        grind = recipe.grind_size or "-"
+        temp = recipe.water_temp or "-"
+        print(f"{recipe.name:<30} {(recipe.method or '-'):<15} {dose:>6} {water:>7} {ratio:>6} {grind:>8} {temp:>6}")
+
+    print(dim(f"\n{len(recipes)} recipe(s)"))
+    return 0
+
+
 def cmd_beans(args):
     """List all beans."""
     filepath = os.path.expanduser(args.file)
-    beans, brews = parse_journal(filepath)
+    beans, brews, _ = parse_journal(filepath)
 
     if not beans:
         print("No beans found.")
@@ -466,7 +627,7 @@ def cmd_beans(args):
 def cmd_brews(args):
     """List brews, with optional filters."""
     filepath = os.path.expanduser(args.file)
-    _, brews = parse_journal(filepath)
+    _, brews, _ = parse_journal(filepath)
 
     if not brews:
         print("No brews found.")
@@ -506,7 +667,7 @@ def cmd_brews(args):
 def cmd_stats(args):
     """Show overall statistics."""
     filepath = os.path.expanduser(args.file)
-    beans, brews = parse_journal(filepath)
+    beans, brews, _ = parse_journal(filepath)
 
     print(bold("openbrew stats"))
     print(dim("─" * 40))
@@ -576,7 +737,7 @@ def cmd_stats(args):
 def cmd_timeline(args):
     """Show a visual timeline of recent brews."""
     filepath = os.path.expanduser(args.file)
-    _, brews = parse_journal(filepath)
+    _, brews, _ = parse_journal(filepath)
 
     limit = int(getattr(args, "limit", 0) or 15)
     brews = sorted(brews, key=lambda b: b.date, reverse=True)[:limit]
@@ -608,7 +769,7 @@ def cmd_timeline(args):
 def cmd_top(args):
     """Show top-rated beans/brews."""
     filepath = os.path.expanduser(args.file)
-    _, brews = parse_journal(filepath)
+    _, brews, _ = parse_journal(filepath)
 
     rated = [b for b in brews if b.rating]
     if not rated:
@@ -641,7 +802,7 @@ def cmd_top(args):
 def cmd_search(args):
     """Full-text search across all entries."""
     filepath = os.path.expanduser(args.file)
-    beans, brews = parse_journal(filepath)
+    beans, brews, recipes = parse_journal(filepath)
     query = " ".join(args.query).lower()
 
     results = []
@@ -656,6 +817,11 @@ def cmd_search(args):
         if query in text:
             results.append(("brew", brew.date, serialize_brew(brew)))
 
+    for recipe in recipes:
+        text = f"{recipe.name} {recipe.method or ''} {recipe.grinder or ''} {' '.join(recipe.tags)} {' '.join(recipe.notes)}".lower()
+        if query in text:
+            results.append(("recipe", recipe.date_added, serialize_recipe(recipe)))
+
     if not results:
         print(f'No results for "{query}".')
         return 0
@@ -663,7 +829,12 @@ def cmd_search(args):
     print(bold(f'{len(results)} result(s) for "{query}"'))
     print()
     for kind, date, entry in results:
-        label = green("bean") if kind == "bean" else cyan("brew")
+        if kind == "bean":
+            label = green("bean")
+        elif kind == "recipe":
+            label = mag("recipe")
+        else:
+            label = cyan("brew")
         print(f"  [{label}] {entry}")
         print()
     return 0
@@ -672,13 +843,15 @@ def cmd_search(args):
 def cmd_tags(args):
     """List all tags used."""
     filepath = os.path.expanduser(args.file)
-    beans, brews = parse_journal(filepath)
+    beans, brews, recipes = parse_journal(filepath)
 
     tags = Counter()
     for bean in beans:
         tags.update(bean.tags)
     for brew in brews:
         tags.update(brew.tags)
+    for recipe in recipes:
+        tags.update(recipe.tags)
 
     if not tags:
         print("No tags found.")
@@ -694,7 +867,7 @@ def cmd_tags(args):
 def cmd_methods(args):
     """List all brew methods used."""
     filepath = os.path.expanduser(args.file)
-    _, brews = parse_journal(filepath)
+    _, brews, _ = parse_journal(filepath)
 
     methods = Counter(b.method for b in brews if b.method)
     if not methods:
@@ -725,14 +898,14 @@ def cmd_import(args):
         f.write(content)
         f.write("\n")
 
-    beans, brews = parse_journal(source)
+    beans, brews, _ = parse_journal(source)
     print(green(f"✓ Imported {len(beans)} bean(s) and {len(brews)} brew(s) from {source}"))
     return 0
 
 def cmd_finish(args):
     """Mark a bean as finished by adding 'finished: yes' to its entry."""
     filepath = os.path.expanduser(args.file)
-    beans, _ = parse_journal(filepath)
+    beans, _, _ = parse_journal(filepath)
 
     # Show only active beans
     active = [b for b in beans if not b.finished]
@@ -875,9 +1048,14 @@ def build_parser():
     add_sub = add_p.add_subparsers(dest="add_type")
     add_sub.add_parser("bean", help="Add a new bean")
     add_sub.add_parser("brew", help="Add a new brew")
+    add_sub.add_parser("recipe", help="Add a new recipe")
 
     # beans
     sub.add_parser("beans", help="List all beans")
+
+    # recipes
+    recipes_p = sub.add_parser("recipes", help="List recipes")
+    recipes_p.add_argument("-m", "--method", help="Filter by brew method")
 
     # brews
     brews_p = sub.add_parser("brews", help="List brews")
@@ -949,6 +1127,7 @@ def main():
     commands = {
         "beans": cmd_beans,
         "brews": cmd_brews,
+        "recipes": cmd_recipes,
         "stats": cmd_stats,
         "timeline": cmd_timeline,
         "top": cmd_top,
@@ -967,8 +1146,10 @@ def main():
             return cmd_add_bean(args)
         elif args.add_type == "brew":
             return cmd_add_brew(args)
+        elif args.add_type == "recipe":
+            return cmd_add_recipe(args)
         else:
-            print(f"Usage: {PROG} add [bean|brew]")
+            print(f"Usage: {PROG} add [bean|brew|recipe]")
             return 1
 
     if args.command == "help":
